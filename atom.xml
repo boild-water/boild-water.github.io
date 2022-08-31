@@ -1,0 +1,1048 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+    <id>https://boild-water.github.io</id>
+    <title>BoildWater</title>
+    <updated>2022-08-31T01:23:52.714Z</updated>
+    <generator>https://github.com/jpmonette/feed</generator>
+    <link rel="alternate" href="https://boild-water.github.io"/>
+    <link rel="self" href="https://boild-water.github.io/atom.xml"/>
+    <subtitle>温故而知新</subtitle>
+    <logo>https://boild-water.github.io/images/avatar.png</logo>
+    <icon>https://boild-water.github.io/favicon.ico</icon>
+    <rights>All rights reserved 2022, BoildWater</rights>
+    <entry>
+        <title type="html"><![CDATA[Java类加载]]></title>
+        <id>https://boild-water.github.io/post/java-lei-jia-zai/</id>
+        <link href="https://boild-water.github.io/post/java-lei-jia-zai/">
+        </link>
+        <updated>2022-08-30T08:15:06.000Z</updated>
+        <content type="html"><![CDATA[<h4 id="一-前言">一、前言</h4>
+<p>最近看spring源码，想深入探究一下spring中的<code>&quot;classpath*:&quot;</code>和<code>&quot;classpath:&quot;</code>写法的区别，例如：</p>
+<pre><code class="language-java">ApplicationContext ac = new ClassPathXmlApplicationContext(&quot;classpath*:spring*&quot;);
+ApplicationContext ac = new ClassPathXmlApplicationContext(&quot;classpath:spring*&quot;);
+</code></pre>
+<p>区别就在于<code>classpath*</code>会查找<code>java.class.path</code>下所有符合<code>spring*</code>样式的文件并加载，因为引入的第三方依赖打包的jar也在<code>java.class.path</code>下，如果某个jar中含有同路径文件，也会被找到，而<code>classpath</code>只会找到当前项目的<code>classpath</code>下与<code>spring*</code>样式匹配的多个文件，看了下源码的区别</p>
+<pre><code class="language-java">// org.springframework.core.io.support.PathMatchingResourcePatternResolver#getResources  
+@Override
+public Resource[] getResources(String locationPattern) throws IOException {
+  Assert.notNull(locationPattern, &quot;Location pattern must not be null&quot;);
+  if (locationPattern.startsWith(CLASSPATH_ALL_URL_PREFIX)) {
+    // a class path resource (multiple resources for same name possible)
+    if (getPathMatcher().isPattern(locationPattern.substring(CLASSPATH_ALL_URL_PREFIX.length()))) {
+      // a class path resource pattern
+      return findPathMatchingResources(locationPattern);
+    }
+    else {
+      // classpath*的写法最终会执行findAllClassPathResources方法
+      // findAllClassPathResources方法中调用了 classLoader.getResources(path)方法，可以查找到多个文件，构造多个资源对象返回
+      // all class path resources with the given name
+      return findAllClassPathResources(locationPattern.substring(CLASSPATH_ALL_URL_PREFIX.length()));
+    }
+  }
+  else {
+    // Generally only look for a pattern after a prefix here,
+    // and on Tomcat only after the &quot;*/&quot; separator for its &quot;war:&quot; protocol.
+    int prefixEnd = (locationPattern.startsWith(&quot;war:&quot;) ? locationPattern.indexOf(&quot;*/&quot;) + 1 :
+                     locationPattern.indexOf(':') + 1);
+    if (getPathMatcher().isPattern(locationPattern.substring(prefixEnd))) {
+      // a file pattern
+      return findPathMatchingResources(locationPattern);
+    }
+    else {
+      // classpath的写法最终会执行到这里
+      // org.springframework.core.io.DefaultResourceLoader#getResource中，直接new了一个ClassPathResource对象出来
+      // a single resource with the given name
+      return new Resource[] {getResourceLoader().getResource(locationPattern)};
+    }
+  }
+}  
+</code></pre>
+<p>因为对classLoader.getResource(path)和classLoader.getResources(path)的不熟悉，所以就去搜索了相关信息。然后，就对ClassLoader产生了兴趣。</p>
+<h5 id="1-一个java程序的日常开发过程">1、一个Java程序的日常开发过程</h5>
+<blockquote>
+<p>1、编写.java文件</p>
+<p>2、将写好的java代码打包成jar包或者war包，即编译代码，包里面就是.java文件对应的.class文件</p>
+<p>3、使用命令“java -jar”运行打包好的程序，即运行代码</p>
+</blockquote>
+<h5 id="2-java文件的运行过程">2、Java文件的运行过程</h5>
+<figure data-type="image" tabindex="1"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/webp" alt="img" loading="lazy"></figure>
+<h4 id="二-java类加载过程">二、Java类加载过程</h4>
+<figure data-type="image" tabindex="2"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/view.png" alt="preview" loading="lazy"></figure>
+<h5 id="1-loading加载">1、Loading加载</h5>
+<blockquote>
+<p>通过类的全限定名（包名 + 类名），获取到该类的<code>.class</code>文件的二进制字节流</p>
+<p>将二进制字节流所代表的静态存储结构，转化为方法区运行时的数据结构</p>
+<p>在<code>内存</code>中生成一个代表该类的<code>java.lang.Class</code>对象，作为方法区这个类的各种数据的访问入口</p>
+</blockquote>
+<p>总结：<code>加载二进制数据到内存</code> —&gt; <code>映射成jvm能识别的结构</code> —&gt; <code>在内存中生成class文件</code>。</p>
+<h5 id="2-linking链接">2、Linking链接</h5>
+<p>链接是指将上面创建好的class类合并至Java虚拟机中，使之能够执行的过程，可分为<code>验证</code>、<code>准备</code>、<code>解析</code>三个阶段。</p>
+<p><strong>① 验证（Verify）</strong></p>
+<blockquote>
+<p>确保class文件中的字节流包含的信息，符合当前虚拟机的要求，保证这个被加载的class类的正确性，不会危害到虚拟机的安全。</p>
+</blockquote>
+<p><strong>② 准备（Prepare）</strong></p>
+<blockquote>
+<p>为类中的<code>静态字段</code>分配内存，并设置默认的初始值，比如int类型初始值是0。被final修饰的static字段不会设置，因为final在编译的时候就分配了</p>
+</blockquote>
+<p><strong>③ 解析（Resolve）</strong></p>
+<blockquote>
+<p>解析阶段的目的，是将常量池内的符号引用转换为直接引用的过程（将常量池内的符号引用解析成为实际引用）。如果符号引用指向一个未被加载的类，或者未被加载类的字段或方法，那么解析将触发这个类的加载（但未必触发这个类的链接以及初始化。）</p>
+<p>事实上，解析器操作往往会伴随着 JVM 在执行完初始化之后再执行。 符号引用就是一组符号来描述所引用的目标。符号引用的字面量形式明确定义在《Java 虚拟机规范》的Class文件格式中。直接引用就是直接指向目标的指针、相对偏移量或一个间接定位到目标的句柄。</p>
+<p>解析动作主要针对类、接口、字段、类方法、接口方法、方法类型等。对应常量池中的 CONSTANT_Class_info、CONSTANT_Fieldref_info、CONSTANT_Methodref_info等。</p>
+</blockquote>
+<h5 id="3-initialization初始化">3、initialization初始化</h5>
+<blockquote>
+<p>初始化就是执行类的构造器方法 <code>init()</code>的过程。</p>
+<p>这个方法不需要定义，是javac编译器自动收集类中所有类变量的赋值动作和静态代码块中的语句合并来的。</p>
+<p>若该类具有父类，<code>jvm</code>会保证父类的<code>init</code>先执行，然后在执行子类的<code>init</code>。</p>
+</blockquote>
+<h4 id="三-java类加载器classloader">三、Java类加载器ClassLoader</h4>
+<h5 id="1-类加载器分类">1、类加载器分类</h5>
+<p>JVM的类加载是通过ClassLoader及其子类来完成的，类加载器的层级与关系如下：</p>
+<figure data-type="image" tabindex="3"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/de9a45043712043c0700e5cc548218cb.png" alt="img" loading="lazy"></figure>
+<p>注意这里的父子并不是继承的意思，它们都是<code>ClassLoader</code>抽象类的实现，因此都含有一个<code>ClassLoader parent</code>成员变量，该变量指向其父加载器，类似单向链表。</p>
+<p><strong>① 启动类/引导类：Bootstrap ClassLoader</strong></p>
+<blockquote>
+<p>这个类加载器使用C/C++语言实现的，嵌套在JVM内部，java程序无法直接操作这个类。</p>
+<p>它用来加载Java核心类库，如：<code>JAVA_HOME/jre/lib/rt.jar</code>、<code>resources.jar</code>、<code>sun.boot.class.path</code>路径下的包，用于提供jvm运行所需的包。</p>
+<p>并不是继承自java.lang.ClassLoader，它没有父类加载器</p>
+<p>它加载<code>扩展类加载器</code>和<code>应用程序类加载器</code>，并成为他们的父类加载器</p>
+<p>出于安全考虑，启动类只加载包名为：java、javax、sun开头的类</p>
+</blockquote>
+<p><strong>② 扩展类加载器：Extension ClassLoader</strong></p>
+<blockquote>
+<p>Java语言编写，由<code>sun.misc.Launcher$ExtClassLoader</code>实现，我们可以用Java程序操作这个加载器</p>
+<p>派生继承自java.lang.ClassLoader，父类加载器为<code>启动类加载器</code></p>
+<p>从系统属性：<code>java.ext.dirs</code>目录中加载类库，或者从JDK安装目录：<code>jre/lib/ext</code>目录下加载类库。我们就可以将我们自己的包放在以上目录下，就会自动加载进来了。</p>
+</blockquote>
+<p><strong>③ 应用程序类加载器：Application Classloader</strong></p>
+<blockquote>
+<p>Java语言编写，由<code>sun.misc.Launcher$AppClassLoader</code>实现</p>
+<p>派生继承自java.lang.ClassLoader，父类加载器为<code>启动类加载器</code></p>
+<p>它负责加载<code>环境变量classpath</code>或者<code>系统属性java.class.path</code>指定路径下的类库</p>
+<p>它是程序中默认的类加载器，我们Java程序中的类，都是由它加载完成的。</p>
+<p>我们可以通过<code>ClassLoader#getSystemClassLoader()</code>获取并操作这个加载器</p>
+</blockquote>
+<p><strong>④ 自定义加载器</strong></p>
+<blockquote>
+<p>一般情况下，以上3种加载器能满足我们日常的开发工作，不满足时，我们还可以<code>自定义加载器</code></p>
+<p>比如用网络加载Java类，为了保证传输中的安全性，采用了加密操作，那么以上3种加载器就无法加载这个类，这时候就需要<code>自定义加载器</code></p>
+</blockquote>
+<h5 id="2-类加载机制-双亲委派">2、类加载机制-双亲委派</h5>
+<p><strong>工作原理</strong></p>
+<p>（1）如果一个<code>类加载器</code>接收到了<code>类加载</code>的请求，它自己不会先去加载，会把这个请求委托给<code>父类加载器</code>去执行。</p>
+<p>（2）如果父类还存在父类加载器，则继续向上委托，一直委托到<code>启动类加载器：Bootstrap ClassLoader</code></p>
+<p>（3）如果父类加载器可以完成加载任务，就返回成功结果，如果父类加载失败，就由子类自己去尝试加载，如果子类加载失败就会抛出<code>ClassNotFoundException</code>异常，这就是<code>双亲委派模式</code></p>
+<p><strong>代码</strong></p>
+<p><code>loadClass()</code>是抽象类<code>ClassLoader</code>中的类加载的核心方法，该段代码就是双亲委派的实现</p>
+<pre><code class="language-java">protected Class&lt;?&gt; loadClass(String name, boolean resolve) throws ClassNotFoundException
+{
+  synchronized (getClassLoadingLock(name)) {
+    // 若该类已被加载过，直接取缓存，native方法实现
+    Class c = findLoadedClass(name);
+    if (c == null) {
+      try {
+        // 只要有父加载器就先委派父加载器来加载
+        if (parent != null) {
+          // 注意此处递归调用
+          c = parent.loadClass(name, false);
+        } else {
+          // ext的parent为null，因为Bootstrap是无法被程序被访问的，默认parent为null时其父加载器就是Bootstrap
+          // 此时直接用native方法调用启动类加载加载，若找不到则抛异常
+          c = findBootstrapClassOrNull(name);
+        }
+      } catch (ClassNotFoundException e) {
+        // 对ClassNotFoundException不做处理，仅用作退出递归
+      }
+      if (c == null) {
+        // 如果父加载器无法加载那么就在本类加载器的范围内进行查找
+        // findClass找到class文件后将调用defineClass方法把字节码导入方法区，同时缓存结果
+        c = findClass(name);
+      }
+    }
+    // 是否解析，默认false
+    if (resolve) {
+      resolveClass(c);
+    }
+    return c;
+  }
+}
+</code></pre>
+<h5 id="3-类加载特点">3、类加载特点</h5>
+<blockquote>
+<p><strong>全盘负责</strong>，当一个类加载器负责加载某个Class时，该Class所依赖的和引用的其他Class也将由该类加载器负责载入，除非显示使用另外一个类加载器来载入</p>
+<p><strong>父类委托</strong>，先让父类加载器试图加载该类，只有在父类加载器无法加载该类时才尝试从自己的类路径中加载该类</p>
+<p><strong>缓存机制</strong>，缓存机制将会保证所有加载过的Class都会被缓存，当程序中需要使用某个Class时，类加载器先从缓存区寻找该Class，只有缓存区不存在，系统才会读取该类对应的二进制数据，并将其转换成Class对象，存入缓存区。这就是为什么修改了Class后，必须重启JVM，程序的修改才会生效，当然也可以不重启JVM，详情见下面介绍的<code>HotSwap</code></p>
+<p><strong>沙箱安全</strong>，比如开发者可以自定义一个类，就叫做<code>java.lang.String</code>，在这个类中写上自己的逻辑，代码编译也是能过的，但是运行的时候就会报错，原因就在于类加载的时候根本就不会去加载这个自定义的类，因为在jdk的类库中是存在<code>java.lang.String</code>类的，是被<code>顶级引导类加载器(Bootstrap ClassLoader)</code>加载。这样可以保证对 Java 核心源代码的保护，这就是沙箱安全机制</p>
+</blockquote>
+<h5 id="4-获取classloader几种方式">4、获取ClassLoader几种方式</h5>
+<p>它是一个抽象类，其后所有的类加载器继承自 ClassLoader（不包括启动类加载器）</p>
+<pre><code class="language-java">// 方式一：获取当前类的 ClassLoader
+clazz.getClassLoader()
+// 方式二：获取当前线程上下文的 ClassLoader
+Thread.currentThread().getContextClassLoader()
+// 方式三：获取系统的 ClassLoader
+ClassLoader.getSystemClassLoader()
+// 方式四：获取调用者的 ClassLoader
+DriverManager.getCallerClassLoader()
+</code></pre>
+<h5 id="5-自定义类加载器">5、自定义类加载器</h5>
+<p>通常情况下，都是直接使用系统类加载器。但是有的时候，也需要自定义类加载器。比如应用通过网络来传输Java类的字节码，为保证<strong>安全性，<strong>这些字节码经过了</strong>加密处理</strong>，这时系统类加载器就无法对其进行加载，因为这些字节码文件可以存放在网络上的各个地方，这样则需要自定义类加载器来实现。自定义类加载器一般都是继承自<code>ClassLoader</code>类，从上面对 <code>loadClass</code>方法来分析来看，只需要重写 <code>findClass</code>方法即可。</p>
+<p>下面通过一个示例来演示自定义类加载器的流程：</p>
+<pre><code class="language-csharp">public class MyClassLoader extends ClassLoader { 
+  
+   private String root; 
+  
+   protected Class&lt;?&gt; findClass(String name) throwsClassNotFoundException {
+       byte[] classData = loadClassData(name);
+       if (classData == null) {
+           throw new ClassNotFoundException();
+       } else {
+            return defineClass(name, classData, 0,classData.length);
+       }
+    }
+ 
+   private byte[] loadClassData(String className) {
+       String fileName = root + File.separatorChar
+                + className.replace('.',File.separatorChar) + &quot;.class&quot;;
+       try {
+           InputStream ins = new FileInputStream(fileName);
+           ByteArrayOutputStream baos = new ByteArrayOutputStream();
+           int bufferSize = 1024;
+            byte[] buffer = new byte[bufferSize];
+           int length = 0;
+           while ((length = ins.read(buffer)) != -1) {
+                baos.write(buffer, 0, length);
+           }
+           return baos.toByteArray();
+       } catch (IOException e) {
+           e.printStackTrace();
+       }
+       return null;
+    }
+ 
+   public String getRoot() {
+       return root;
+    }
+ 
+   public void setRoot(String root) {
+       this.root = root;
+    }
+ 
+   public static void main(String[] args) {
+ 
+       MyClassLoader classLoader = new MyClassLoader();
+       
+       Class&lt;?&gt; testClass = null;
+       try {
+         	 // 可以指定任意本地目录下的class文件或者远程地址等，将其加载到JVM中
+           classLoader.setRoot(&quot;E:\\temp&quot;);
+           testClass =classLoader.loadClass(&quot;org.example.classloader.Test&quot;);
+           Object object = testClass.newInstance();
+           System.out.println(object.getClass().getClassLoader());
+       } catch (Exception e) {
+           e.printStackTrace();
+       } 
+    }
+}
+</code></pre>
+<p>自定义类加载器的核心在于对字节码文件的获取，如果是加密的字节码则需要在该类中对文件进行解密。由于这里只是演示，并未对class文件进行加密，因此没有解密的过程。这里有几点需要注意：</p>
+<blockquote>
+<p>1）这里传递的文件名需要是类的全限定性名称，即<code>org.example.classloader.Test</code>格式的，因为 <code>defineClass</code> 方法是按这种格式进行处理的。</p>
+<p>2）最好不要重写loadClass方法，因为这样容易破坏双亲委托机制，参考上面<code>loadClass</code>源码，<code>loadClass</code>就是双亲委派的实现方法，如果自定义的ClassLoader重写了loadClass，就可能会破会双亲委派机制，所以一般来说重写<code>defineClass</code>方法即可。</p>
+</blockquote>
+<h4 id="四-几种获取classloader的区别">四、几种获取ClassLoader的区别</h4>
+<p>上面介绍了获取ClassLoader的几种方式，这些方式有哪些区别和联系？</p>
+<pre><code class="language-java">// 方式一：获取当前类的 ClassLoader
+clazz.getClassLoader()
+// 方式二：获取当前线程上下文的 ClassLoader
+Thread.currentThread().getContextClassLoader()
+// 方式三：获取系统的 ClassLoader
+ClassLoader.getSystemClassLoader()
+</code></pre>
+<p>写了个简单demo</p>
+<pre><code class="language-java">public class MyTest {
+	public static void main(String[] args) {
+    // null
+    System.out.println(String.class.getClassLoader());
+    // sun.misc.Launcher$AppClassLoader@18b4aac2
+    System.out.println(MyTest.class.getClassLoader());
+    // true
+    System.out.println(Thread.currentThread().getContextClassLoader() == MyTest.class.getClassLoader());
+    // true  
+    System.out.println(Thread.currentThread().getContextClassLoader() == ClassLoader.getSystemClassLoader());
+  }
+}
+</code></pre>
+<p>dubug过程发现，<code>thread.getContextClassLoader()</code>、<code>clazz.getClassLoader()</code>以及<code>ClassLoader.getSystemClassLoader()</code>方法获得的对象是同一个对象 <code>Launcher$AppClassLoader@xxx</code>，难道这三者只是写法不同，实际上获得的是同一个对象？</p>
+<h5 id="1-clazzgetclassloader">1、clazz.getClassLoader</h5>
+<p>通过类对象获取classLoader</p>
+<pre><code class="language-java">MyTest.class.getClassLoader()
+// 或者下面这种方式
+new MyTest().getClass().getClassLoader();
+</code></pre>
+<p>不同类对象的加载器可能是不同的，主要取决于该类是由哪个类加载器加载到JVM中的，比如<code>String.class.getClassLoader</code>返回<code>null</code>，因为<code>java.lang.String</code>由顶级的引导类加载器加载，而引导类加载器无法通过java代码获取，会返回<code>null</code>，而开发者自定义的类一般是由<code>应用类加载器加载(AppClassLoader)</code>，且不同类对象返回的类加载器都是同一个<code>AppClassLoader</code></p>
+<h5 id="2-classloadergetsystemclassloader">2、ClassLoader.getSystemClassLoader()</h5>
+<pre><code class="language-java">		@CallerSensitive
+    public static ClassLoader getSystemClassLoader() {
+      	// 初始化SystemClassLoader
+        initSystemClassLoader();
+        if (scl == null) {
+            return null;
+        }
+        SecurityManager sm = System.getSecurityManager();
+        if (sm != null) {
+            checkClassLoaderPermission(scl, Reflection.getCallerClass());
+        }
+        return scl;
+    }
+
+    private static synchronized void initSystemClassLoader() {
+        if (!sclSet) {
+            if (scl != null)
+                throw new IllegalStateException(&quot;recursive invocation&quot;);
+            // Launcher对象中初始化了拓展类加载器以及应用类加载器
+            sun.misc.Launcher l = sun.misc.Launcher.getLauncher();
+            if (l != null) {
+                Throwable oops = null;
+                // 获取Launcher对象的classLoader设置为scl
+                scl = l.getClassLoader();
+                try {
+                    // 当然，如果&quot;java.system.class.loader&quot;系统属性被定义，可以通过这个系统属性创建新的系统类加载器
+                  	// 让scl不再是Launcher对象提供的类加载器，但是Launcher对象的类加载器会作为创建的系统类加载器的父加载器
+                    scl = AccessController.doPrivileged(
+                        new SystemClassLoaderAction(scl));
+                } catch (PrivilegedActionException pae) {
+                    oops = pae.getCause();
+                    if (oops instanceof InvocationTargetException) {
+                        oops = oops.getCause();
+                    }
+                }
+                if (oops != null) {
+                    if (oops instanceof Error) {
+                        throw (Error) oops;
+                    } else {
+                        // wrap the exception
+                        throw new Error(oops);
+                    }
+                }
+            }
+            sclSet = true;
+        }
+    }
+
+class SystemClassLoaderAction
+    implements PrivilegedExceptionAction&lt;ClassLoader&gt; {
+    private ClassLoader parent;
+
+    SystemClassLoaderAction(ClassLoader parent) {
+        this.parent = parent;
+    }
+
+    public ClassLoader run() throws Exception {
+        // 获取java.system.class.loader属性
+        String cls = System.getProperty(&quot;java.system.class.loader&quot;);
+        if (cls == null) {
+            return parent;
+        }
+
+        Constructor&lt;?&gt; ctor = Class.forName(cls, true, parent)
+            .getDeclaredConstructor(new Class&lt;?&gt;[] { ClassLoader.class });
+      
+      	// 创建类加载器并且设置父加载器
+        ClassLoader sys = (ClassLoader) ctor.newInstance(
+            new Object[] { parent });
+        // 并且会把当前线程的类加载器设置为这个自定义的系统类加载器
+        Thread.currentThread().setContextClassLoader(sys);
+        return sys;
+    }
+}
+</code></pre>
+<p>查看getSystemClassLoader方法源码，发现其中有初始化SystemClassLoader相关代码，想看下scl变量是什么时候赋值的，可是debug发现，程序运行过程中并不会进入initSystemClassLoader()的逻辑代码块，scl、sclSet已经被设置过了值，而initSystemClassLoader()方法的调用地方只在getSystemClassLoader()方法中，于是看下getSystemClassLoader方法的注释</p>
+<blockquote>
+<p>Returns the system class loader for delegation. This is the default delegation parent for new ClassLoader instances, and is typically the class loader used to start the application.<br>
+This method is first invoked early in the runtime's startup sequence, at which point it creates the system class loader and sets it as the context class loader of the invoking Thread.</p>
+<p>此方法首先在运行启动序列的早期被调用，此时它创建系统类加载器并将其设置为调用Thread的上下文类加载器。</p>
+</blockquote>
+<p>反正这个方法不管被谁调用，都会被调用，如果被调用，就是获取Launcher对象的classLoader设置为scl</p>
+<p>所以Launcher对象是什么？</p>
+<pre><code class="language-java">public class Launcher {
+    // 静态变量，该类被加载的时候就会执行new Launcher();
+    private static Launcher launcher = new Launcher();
+  
+  	// 应用类加载器
+    private ClassLoader loader;
+  
+    public Launcher() {
+        Launcher.ExtClassLoader var1;
+        try {
+            // 获取拓展类加载器
+            var1 = Launcher.ExtClassLoader.getExtClassLoader();
+        } catch (IOException var10) {
+            throw new InternalError(&quot;Could not create extension class loader&quot;, var10);
+        }
+
+        try {
+            // 把var1拓展类加载器作为参数，获取应用类加载器，var1会被设置为应用类加载器的父加载器
+            this.loader = Launcher.AppClassLoader.getAppClassLoader(var1);
+        } catch (IOException var9) {
+            throw new InternalError(&quot;Could not create application class loader&quot;, var9);
+        }
+
+        // 这里获取当前线程调用了setContextClassLoader方法，把应用类加载器设置到了当前线程中(就是启动应用的线程)
+        // 可见thread.getContextClassLoader获取的默认就是应用类加载器
+        Thread.currentThread().setContextClassLoader(this.loader);
+
+    }
+  
+  
+    /**
+    * 应用类加载器是Launcher类的一个静态内部类，继承自URLClassLoader
+    */
+    static class AppClassLoader extends URLClassLoader {
+      
+        final URLClassPath ucp = SharedSecrets.getJavaNetAccess().getURLClassPath(this);
+
+        public static ClassLoader getAppClassLoader(final ClassLoader var0) throws IOException {
+            // 可见AppClassLoader确实是&quot;java.class.path&quot;路径下加载类信息的
+            final String var1 = System.getProperty(&quot;java.class.path&quot;);
+            final File[] var2 = var1 == null ? new File[0] : Launcher.getClassPath(var1);
+            return (ClassLoader)AccessController.doPrivileged(new PrivilegedAction&lt;Launcher.AppClassLoader&gt;() {
+                public Launcher.AppClassLoader run() {
+                    URL[] var1x = var1 == null ? new URL[0] : Launcher.pathToURLs(var2);
+                  	// 创建应用类加载器
+                    return new Launcher.AppClassLoader(var1x, var0);
+                }
+            });
+        }
+
+        AppClassLoader(URL[] var1, ClassLoader var2) {
+            // 会把var2,即ExtClassLoader对象设置为parent
+            super(var1, var2, Launcher.factory);
+            this.ucp.initLookupCache(this);
+        }
+    }
+
+    /**
+    * 拓展类加载器是Launcher类的一个静态内部类，继承自URLClassLoader
+    */
+    static class ExtClassLoader extends URLClassLoader {
+      
+        private static volatile Launcher.ExtClassLoader instance;
+
+        public static Launcher.ExtClassLoader getExtClassLoader() throws IOException {
+            if (instance == null) {
+                Class var0 = Launcher.ExtClassLoader.class;
+                synchronized(Launcher.ExtClassLoader.class) {
+                    if (instance == null) {
+                        instance = createExtClassLoader();
+                    }
+                }
+            }
+            return instance;
+        }
+
+        private static Launcher.ExtClassLoader createExtClassLoader() throws IOException {
+            try {
+                return (Launcher.ExtClassLoader)AccessController.doPrivileged(new PrivilegedExceptionAction&lt;Launcher.ExtClassLoader&gt;() {
+                    public Launcher.ExtClassLoader run() throws IOException {
+                      	// 在&quot;java.ext.dirs&quot;路径下找class文件
+                        File[] var1 = Launcher.ExtClassLoader.getExtDirs();
+                        int var2 = var1.length;
+
+                        for(int var3 = 0; var3 &lt; var2; ++var3) {
+                            MetaIndex.registerDirectory(var1[var3]);
+                        }
+												// 创建拓展类加载器
+                        return new Launcher.ExtClassLoader(var1);
+                    }
+                });
+            } catch (PrivilegedActionException var1) {
+                throw (IOException)var1.getException();
+            }
+        }
+
+        public ExtClassLoader(File[] var1) throws IOException {
+            super(getExtURLs(var1), (ClassLoader)null, Launcher.factory);
+            SharedSecrets.getJavaNetAccess().getURLClassPath(this).initLookupCache(this);
+        }
+
+        private static File[] getExtDirs() {
+            String var0 = System.getProperty(&quot;java.ext.dirs&quot;);
+            File[] var1;
+            if (var0 != null) {
+                StringTokenizer var2 = new StringTokenizer(var0, File.pathSeparator);
+                int var3 = var2.countTokens();
+                var1 = new File[var3];
+
+                for(int var4 = 0; var4 &lt; var3; ++var4) {
+                    var1[var4] = new File(var2.nextToken());
+                }
+            } else {
+                var1 = new File[0];
+            }
+
+            return var1;
+        }
+    }  
+}
+</code></pre>
+<p>对sun.misc.Launcher类debug，发现断点也是进不去的，好吧，反正这个类肯定是会在应用启动的时候被加载的，从上面demo中打印出的classloader对象<code>sun.misc.Launcher$AppClassLoader@18b4aac2</code>也可以看出AppClassLoader就来自于sun.misc.Launcher。</p>
+<p>搜索一番资料后发现一句话，<strong>&quot;扩展类加载器&quot;和&quot;应用类加载器&quot;都是由&quot;启动类加载器&quot;加载的</strong>，就认为是启动类加载器加载了Launcher这个类吧。</p>
+<h5 id="3-threadgetcontextclassloader">3、thread.getContextClassLoader</h5>
+<p>即当前线程中的类加载器，根据上文描述，可以看到ContextClassLoader是如何被赋值的</p>
+<h5 id="总结">总结</h5>
+<blockquote>
+<p>1、一般情况下，clazz.getClassLoader = ClassLoader.getSystemClassLoader() = thread.getContextClassLoader = AppClassLoader</p>
+<p>ps：这里的clazz对象不是由启动类加载器或者拓展类加载器加载的类，比如不是java.lang.String</p>
+<p>2、如果设置了&quot;java.system.class.loader&quot;属性，那么会创建<code>自定义系统类加载器</code>，这个系统类加载器的<code>父加载器</code>就是AppClassLoader，同时把当前线程的类加载器设置为这个自定义的系统类加载器</p>
+</blockquote>
+<h4 id="五-threadcontextclassloader的作用">五、ThreadContextClassLoader的作用</h4>
+<p><code>ThreadContextClassLoader</code>就是指上文的<code>thread.getContextClassLoader</code>，下文简称为<code>TCCL</code></p>
+<p>通过上文看到TTCL就是Java放到线程里的应用类加载器，为什么要放到线程中？直接使用<code>clazz.getClassLoader</code>不就行了？有什么用途？</p>
+<h5 id="1-反向委派机制">1、反向委派机制</h5>
+<p>Java提供了很多接口，比如SPI相关的接口，JDBC、JNDI等，这些 SPI 的接口属于 Java 核心库，一般存在rt.jar包中，由启动类加载器加载。Java只提供接口，这些接口的具体实现由不同厂商去实现，以JDBC为例，有连接MySQL的，也有连接ORACLE的，使用Java语言操作数据库，我们习惯于</p>
+<pre><code class="language-mysql">  //步骤1：加载驱动(mysql)
+	Class.forName(&quot;com.mysql.jdbc.Driver&quot;);
+  //SQL Server 连接：com.microsoft.sqlserver.jdbc.SQLServerDriver
+  //Oracle 连接：oracle.jdbc.driver.OracleDriver
+
+	 //步骤2：得到连接
+	 Connection conn = DriverManager.getConnection(&quot;jdbc:mysql://localhost:3306/test?characterEncoding=UTF-8&quot;, &quot;root&quot;,&quot;root&quot;);
+	 
+  //步骤3：得到执行sql语句的对象
+	PreparedStatement pstmt =  conn.prepareStatement(&quot;select * from xxx&quot;);
+	// ...
+
+</code></pre>
+<p>如果操作MySQL，那么就需要引入MySQL的驱动依赖的jar包<code>mysql-connector-java-xxx</code>，在程序运行的时候主动加载驱动器<code>Class.forName(&quot;com.mysql.jdbc.Driver&quot;)</code>，那么就可以操作MySQL数据库了。</p>
+<p>从<code>Java1.6</code>开始自带的<code>jdbc4.0</code>版本已支持<code>SPI</code>服务加载机制，只要MySQL的驱动依赖的jar包在类路径中，就可以注册MySQL驱动，也就是说可以不用主动加载驱动<code>Class.forName(&quot;com.mysql.jdbc.Driver&quot;)</code>，这行代码不要也行，怎么做到的呢？</p>
+<p>先了解一下什么是<code>SPI</code></p>
+<blockquote>
+<p><strong>SPI机制简介</strong></p>
+<p>SPI的全名为Service Provider Interface，主要是应用于厂商自定义组件或插件中。在java.util.ServiceLoader的文档里有比较详细的介绍。简单的总结下java SPI机制的思想：我们系统里抽象的各个模块，往往有很多不同的实现方案，比如日志模块、xml解析模块、jdbc模块等方案。面向的对象的设计里，我们一般推荐模块之间基于接口编程，模块之间不对实现类进行硬编码。一旦代码里涉及具体的实现类，就违反了可拔插的原则，如果需要替换一种实现，就需要修改代码。为了实现在模块装配的时候能不在程序里动态指明，这就需要一种服务发现机制。 Java SPI就是提供这样的一个机制：为某个接口寻找服务实现的机制。有点类似IOC的思想，就是将装配的控制权移到程序之外，在模块化设计中这个机制尤其重要。</p>
+<p><strong>SPI具体约定</strong><br>
+Java SPI的具体约定为：当服务的提供者提供了服务接口的一种实现之后，在jar包的META-INF/services/目录里同时创建一个以服务接口命名的文件。该文件里就是实现该服务接口的具体实现类。而当外部程序装配这个模块的时候，就能通过该jar包META-INF/services/里的配置文件找到具体的实现类名，并装载实例化，完成模块的注入。基于这样一个约定就能很好的找到服务接口的实现类，而不需要再代码里制定。jdk提供服务实现查找的一个工具类：java.util.ServiceLoader。</p>
+</blockquote>
+<p>也就是说，Java定义了接口，厂商的实现类只要按照规定放在指定的位置，Java就能自动扫描并加载到该实现类。</p>
+<p>回顾一下Java不同类加载器加载的路径范围，会发现默认情况下没有一个类加载器能主动加载第三方jar包中的类，那么Java是如何做到的呢？以上面的<code>DriverManager</code>为例分析</p>
+<pre><code class="language-java">public class DriverManager {
+    static {
+        // DriverManager被加载时调用，上面写的代码中显示的调用了DriverManager，所以就会加载该类
+        loadInitialDrivers();
+        println(&quot;JDBC DriverManager initialized&quot;);
+    }
+  
+    private static void loadInitialDrivers() {
+        String drivers;
+        try {
+            drivers = AccessController.doPrivileged(new PrivilegedAction&lt;String&gt;() {
+                public String run() {
+                    // 尝试从系统属性&quot;jdbc.drivers&quot;获取驱动器信息
+                    return System.getProperty(&quot;jdbc.drivers&quot;);
+                }
+            });
+        } catch (Exception ex) {
+            drivers = null;
+        }
+        // If the driver is packaged as a Service Provider, load it.
+        // Get all the drivers through the classloader
+        // exposed as a java.sql.Driver.class service.
+        // ServiceLoader.load() replaces the sun.misc.Providers()
+
+        AccessController.doPrivileged(new PrivilegedAction&lt;Void&gt;() {
+            public Void run() {
+                // ServiceLoader对象会去扫描classpath下包括依赖引入的jar包，所有的META-INF/services/java.sql.Driver文件，取出其中的全限定类名，加载该类，并且实例化。
+                ServiceLoader&lt;Driver&gt; loadedDrivers = ServiceLoader.load(Driver.class);
+                Iterator&lt;Driver&gt; driversIterator = loadedDrivers.iterator();
+
+                /* Load these drivers, so that they can be instantiated.
+                 * It may be the case that the driver class may not be there
+                 * i.e. there may be a packaged driver with the service class
+                 * as implementation of java.sql.Driver but the actual class
+                 * may be missing. In that case a java.util.ServiceConfigurationError
+                 * will be thrown at runtime by the VM trying to locate
+                 * and load the service.
+                 *
+                 * Adding a try catch block to catch those runtime errors
+                 * if driver not available in classpath but it's
+                 * packaged as service and that service is there in classpath.
+                 */
+                try{
+                    // 真正的逻辑在这，下面会有详细源码解释
+                    while(driversIterator.hasNext()) {
+                        driversIterator.next();
+                    }
+                } catch(Throwable t) {
+                // Do nothing
+                }
+                return null;
+            }
+        });
+      
+        println(&quot;DriverManager.initialize: jdbc.drivers = &quot; + drivers);
+				
+      	// 如果系统属性&quot;jdbc.drivers&quot;没有人为指定Driver信息，这里就直接返回了
+        // 如果有，下面就会遍历、加载这些类
+        if (drivers == null || drivers.equals(&quot;&quot;)) {
+            return;
+        }
+        String[] driversList = drivers.split(&quot;:&quot;);
+        println(&quot;number of Drivers:&quot; + driversList.length);
+        for (String aDriver : driversList) {
+            try {
+                println(&quot;DriverManager.Initialize: loading &quot; + aDriver);
+                Class.forName(aDriver, true,
+                        ClassLoader.getSystemClassLoader());
+            } catch (Exception ex) {
+                println(&quot;DriverManager.Initialize: load failed: &quot; + ex);
+            }
+        }
+    }
+}
+</code></pre>
+<p><strong>ServiceLoader源码重点分析</strong></p>
+<pre><code class="language-java">// 重点步骤标记上了记号 ①②③④
+AccessController.doPrivileged(new PrivilegedAction&lt;Void&gt;() {
+    public Void run() {
+        ServiceLoader&lt;Driver&gt; loadedDrivers = ServiceLoader.load(Driver.class); // ①
+        Iterator&lt;Driver&gt; driversIterator = loadedDrivers.iterator(); // ②
+      
+        try{
+            while(driversIterator.hasNext()) { // ③
+                driversIterator.next(); // ④
+            }
+        } catch(Throwable t) {
+        // Do nothing
+        }
+        return null;
+    }
+});
+</code></pre>
+<p>① 构建一个ServiceLoader对象，同时初始化一个延迟迭代器，在这个过程中，获取了TTCL，TTCL以及参数传入的java.sql.Driver.class都被传入了延迟迭代器对象中。</p>
+<pre><code class="language-java">public static &lt;S&gt; ServiceLoader&lt;S&gt; load(Class&lt;S&gt; service) {
+		// 获取TTCL，主角出现！！！
+    ClassLoader cl = Thread.currentThread().getContextClassLoader();
+    // 继续调用load方法
+    return ServiceLoader.load(service, cl);
+}
+
+public static &lt;S&gt; ServiceLoader&lt;S&gt; load(Class&lt;S&gt; service,
+                                        ClassLoader loader)
+{
+    return new ServiceLoader&lt;&gt;(service, loader);
+}
+
+private ServiceLoader(Class&lt;S&gt; svc, ClassLoader cl) {
+    // serveice即成员变量Class&lt;S&gt; service，这里被赋值为 Class&lt;java.sql.Driver&gt;
+    service = Objects.requireNonNull(svc, &quot;Service interface cannot be null&quot;);
+    // load即成员变量ClassLoader loader，被赋值为TTCL
+    loader = (cl == null) ? ClassLoader.getSystemClassLoader() : cl;
+    acc = (System.getSecurityManager() != null) ? AccessController.getContext() : null;
+    // 创建延迟迭代器LazyIterator
+    reload();
+}
+
+public void reload() {
+    providers.clear();
+  	// lookupIterator即成员变量LazyIterator lookupIterator
+    lookupIterator = new LazyIterator(service, loader);
+}
+
+/**
+* LazyIterator是ServiceLoader的一个静态内部类
+* 就是这个类完成了资源的加载，下面会分析这个类
+*/
+private class LazyIterator implements Iterator&lt;S&gt; {
+
+    Class&lt;S&gt; service;
+    ClassLoader loader;
+    Enumeration&lt;URL&gt; configs = null;
+    Iterator&lt;String&gt; pending = null;
+    String nextName = null;
+
+    private LazyIterator(Class&lt;S&gt; service, ClassLoader loader) {
+      	// TTCL以及参数传入的java.sql.Driver.class都被传入了延迟迭代器对象中
+        this.service = service;
+        this.loader = loader;
+    }
+    
+}
+</code></pre>
+<p>② 该方法返回一个匿名内部类实例的迭代器，内部真正工作的迭代器就是上面①创建出的延迟迭代器LazyIterator</p>
+<pre><code class="language-java">public Iterator&lt;S&gt; iterator() { return new Iterator&lt;S&gt;() {
+				
+  			// providers是ServiceLoader的成员变量，LinkedHashMap&lt;String,S&gt; providers = new LinkedHashMap&lt;&gt;();
+  			// 不明白这个变量knownProviders放在这里有什么意义？
+  			// 因为起初providers为空，所以使用一个空集合构建的knownProviders，hashNext()方法会一直false，即使后面providers有数据了，但是knownProviders.hashNext()也会false
+  			// 甚至如果使用不当，还可能会抛出 java.util.ConcurrentModificationException 异常
+        Iterator&lt;Map.Entry&lt;String, S&gt;&gt; knownProviders = providers.entrySet().iterator();
+
+  			/**
+  			* knownProviders有就返回true，没有就去调用延迟迭代器的hasNext()
+  			*/
+        public boolean hasNext() {
+            if (knownProviders.hasNext())
+                return true;
+            // 这个lookupIterator就是ServiceLoader的成员变量，①中创建的延迟迭代器LazyIterator
+            return lookupIterator.hasNext();
+        }
+
+  			/**
+  			* knownProviders有就返回，没有就调用lookupIterator.next()
+  			*/
+        public S next() {
+            if (knownProviders.hasNext())
+                return knownProviders.next().getValue();
+            return lookupIterator.next();
+        }
+
+        public void remove() {
+            throw new UnsupportedOperationException();
+        }
+
+    };
+}
+</code></pre>
+<p>③ 使用延迟迭代器获取<code>&quot;META-INF/services/java.sql.Driver&quot;</code>文件，解析文件内容，将文件内容保存在<code>nextName</code>变量中</p>
+<pre><code class="language-java">public boolean hasNext() {
+    if (knownProviders.hasNext())
+        return true;
+  	// knownProviders.hashNext应该会一直false，所以会进入lookupIterator.hasNext()
+    return lookupIterator.hasNext();
+}
+
+public boolean hasNext() {
+    if (acc == null) {
+      	// 加载资源文件，获取文件中的数据
+        return hasNextService();
+    } else {
+        PrivilegedAction&lt;Boolean&gt; action = new PrivilegedAction&lt;Boolean&gt;() {
+            public Boolean run() { return hasNextService(); }
+        };
+        return AccessController.doPrivileged(action, acc);
+    }
+}
+
+private boolean hasNextService() {
+  	// nextName起初为空
+    if (nextName != null) {
+        return true;
+    }
+  	// configs起初为空，configs为LazyIterator对象的成员变量Enumeration&lt;URL&gt; configs
+    if (configs == null) {
+        try {
+          	// fullName = &quot;META-INF/services/&quot; + &quot;java.sql.Driver&quot;
+            String fullName = PREFIX + service.getName();
+            if (loader == null)
+                configs = ClassLoader.getSystemResources(fullName);
+            else
+              	// 获取classpath下所有工程包括jar包中的所有&quot;META-INF/services/java.sql.Driver&quot;文件资源
+                configs = loader.getResources(fullName);
+        } catch (IOException x) {
+            fail(service, &quot;Error locating configuration files&quot;, x);
+        }
+    }
+  	// pending为LazyIterator对象的成员变量Iterator&lt;String&gt; pending，起初为空
+  	// 用于保存&quot;META-INF/services/java.sql.Driver&quot;文件解析出来的字符串
+    while ((pending == null) || !pending.hasNext()) {
+        if (!configs.hasMoreElements()) {
+            return false;
+        }
+      	// 解析&quot;META-INF/services/java.sql.Driver&quot;文件，具体源码不看了，就是文件流的操作
+        pending = parse(service, configs.nextElement());
+    }
+  	// 有个小疑问？pending虽然是个List&lt;String&gt;的迭代器，理论上可能会存在多条记录，但是由于上面while(!pending.hasNext())的条件限制
+  	// 导致即使一个&quot;META-INF/services/java.sql.Driver&quot;文件中包含多行记录，也只会执行一次pending.next()，即nextName只会取java.sql.Driver文件中的第一行记录。
+    nextName = pending.next();
+    return true;
+}
+</code></pre>
+<p>项目pom依赖中引入了</p>
+<pre><code class="language-xml">&lt;dependency&gt;
+    &lt;groupId&gt;mysql&lt;/groupId&gt;
+    &lt;artifactId&gt;mysql-connector-java&lt;/artifactId&gt;
+    &lt;version&gt;8.0.11&lt;/version&gt;
+&lt;/dependency&gt;
+</code></pre>
+<p>看一眼<code>&quot;META-INF/services/java.sql.Driver&quot;</code>文件中是啥？所以，nextName就会赋值为<code>&quot;com.mysql.cj.jdbc.Driver&quot;</code></p>
+<figure data-type="image" tabindex="4"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/image-20220711140801067.png" alt="image-20220711140801067" loading="lazy"></figure>
+<p>④ 加载③获取到的class，并且实例化</p>
+<pre><code class="language-java">public S next() {
+    if (knownProviders.hasNext())
+        return knownProviders.next().getValue();
+  	// knownProviders.hashNext应该会一直false，所以会进入lookupIterator.next()
+    return lookupIterator.next();
+}
+
+public S next() {
+    if (acc == null) {
+      	// 加载步骤③获取到的class，并且实例化
+        return nextService();
+    } else {
+        PrivilegedAction&lt;S&gt; action = new PrivilegedAction&lt;S&gt;() {
+            public S run() { return nextService(); }
+        };
+        return AccessController.doPrivileged(action, acc);
+    }
+}
+
+private S nextService() {
+    if (!hasNextService())
+        throw new NoSuchElementException();
+  	// nextName = &quot;com.mysql.cj.jdbc.Driver&quot;
+    String cn = nextName;
+  	// 把nextName置空为了下一次遍历找新的文件
+    nextName = null;
+    Class&lt;?&gt; c = null;
+    try {
+      	// 仅加载&quot;com.mysql.cj.jdbc.Driver&quot;，并不执行该类的初始化，即不会执行com.mysql.cj.jdbc.Driver类的静态代码块
+        c = Class.forName(cn, false, loader);
+    } catch (ClassNotFoundException x) {
+        fail(service, &quot;Provider &quot; + cn + &quot; not found&quot;);
+    }
+    if (!service.isAssignableFrom(c)) {
+        fail(service, &quot;Provider &quot; + cn  + &quot; not a subtype&quot;);
+    }
+    try {
+      	// 反射创建&quot;com.mysql.cj.jdbc.Driver&quot;实例，同时也会去执行该类的静态代码块，调用java.sql.DriverManager.registerDriver(new Driver())方法，到这里整个过程也就结束了
+        S p = service.cast(c.newInstance());
+        providers.put(cn, p);
+        return p;
+    } catch (Throwable x) {
+        fail(service, &quot;Provider &quot; + cn + &quot; could not be instantiated&quot;, x);
+    }
+    throw new Error();          // This cannot happen
+}
+</code></pre>
+<p><strong>总结</strong></p>
+<blockquote>
+<p>1、程序内显示调用DriverManager.getConnection触发DriverManager类的初始化，满足SPI的约定情况下，使用ServiceLoader到指定位置扫描第三方jar包中的实现类加载以及实例化。</p>
+<p>2、扫描资源时，使用的是classLoader.getResources()方法，会返回classpath下所有<code>&quot;META-INF/services/java.sql.Driver&quot;</code>的资源文件，其中classLoader是TTCL，也就是反向委派机制的主角，启动类加载器和拓展类加载器加载不了的类，那就下派到TTCL去加载，TTCL是什么，一般情况下就是程序启动时把<code>应用类加载器AppClassLoader</code>放到了当前线程。</p>
+<p>3、关于TTCL有没有破坏双亲委派机制的争议？从大的角度来看，启动类加载器和拓展类加载器加载不了的类，下派到TTCL去加载，似乎是破坏了原有的类加载流程，但是根据上文中介绍的双亲委派机制，可以发现，双亲委派的是由<code>loadClass()</code>方法实现的，而这里获取到的TTCL并没有重写loadClass方法，一般情况下TTCL就是AppClassLoader，日常开发中程序代码中也会经常地使用TTCL、AppClassLoader加载类，所以这也算是破坏双亲委派机制？因此，我更愿意把TTCL当做程序<code>反向委派</code>的一种手段。</p>
+</blockquote>
+<h5 id="2-tomcat类加载">2、Tomcat类加载</h5>
+<p>参考 https://blog.csdn.net/yangcheng33/article/details/52631940 相关描述</p>
+<h5 id="3-spring类加载">3、Spring类加载</h5>
+<p>参考 https://blog.csdn.net/yangcheng33/article/details/52631940 相关描述</p>
+<h4 id="六-热加载hotswap">六、热加载HotSwap</h4>
+<h5 id="1-tomcat的热加载">1、Tomcat的热加载</h5>
+<p>参考 https://blog.csdn.net/admin522043032/article/details/124688069</p>
+<h5 id="2-java程序如何实现hotswap">2、Java程序如何实现HotSwap</h5>
+<p>参考 https://www.jianshu.com/p/3bc46de006da</p>
+<h4 id="七-getresource与getresources">七、getResource与getResources</h4>
+<p>测试demo，项目结构如下</p>
+<pre><code>demo
+	|
+	main
+		|
+		src
+			|
+			java
+				|
+				org.example
+					|
+					MyTest.java
+			resources
+				|
+				spring.xml
+</code></pre>
+<pre><code class="language-java">public class MyTest {
+    public static void main(String[] args) throws Exception {
+        // null
+        System.out.println(MyTest.class.getResource(&quot;spring.xml&quot;));
+        // file:/Users/xxx/xxx/demo/target/classes/spring.xml
+        System.out.println(MyTest.class.getResource(&quot;../../../spring.xml&quot;));
+        // file:/Users/xxx/xxx/demo/target/classes/spring.xml
+        System.out.println(MyTest.class.getResource(&quot;/spring.xml&quot;));
+        System.out.println(&quot;---------------&quot;);
+
+        // file:/Users/xxx/xxx/demo/target/classes/spring.xml
+        System.out.println(MyTest.class.getClassLoader().getResource(&quot;spring.xml&quot;));
+        // null
+        System.out.println(MyTest.class.getClassLoader().getResource(&quot;/spring.xml&quot;));
+        System.out.println(&quot;---------------&quot;);
+
+        Enumeration&lt;URL&gt; urls1 = MyTest.class.getClassLoader().getResources(&quot;spring.xml&quot;);
+        while (urls1.hasMoreElements()) {
+            System.out.println(urls1.nextElement());
+        }
+    }
+}
+</code></pre>
+<h5 id="1-clazzgetresource与classloadergetresource">1、clazz.getResource与classLoader.getResource</h5>
+<p>点开clazz.getResource源码看了下，发现clazz.getResource实际上就是调用了classLoader.getResource，只不过调用之前，处理了一下路径</p>
+<pre><code class="language-java">public java.net.URL getResource(String name) {
+  	// 处理路径
+    name = resolveName(name);
+    ClassLoader cl = getClassLoader0();
+    if (cl==null) {
+        // A system class.
+        return ClassLoader.getSystemResource(name);
+    }
+    return cl.getResource(name);
+}
+
+/**
+ * Add a package name prefix if the name is not absolute Remove leading &quot;/&quot;
+ * if name is absolute
+ */
+private String resolveName(String name) {
+    if (name == null) {
+        return name;
+    }
+    if (!name.startsWith(&quot;/&quot;)) {
+      	// 如果不以&quot;/&quot;开头，就获取当前类全限定类名，将&quot;.&quot;替换为&quot;/&quot;，从当前类的所在目录下检索资源
+      	// 如clazz.getResource(&quot;spring.xml&quot;)，clazz为org.example.MyTest.class，经过处理后就变成了，从类路径下寻找org/example/spring.xml文件
+      	// 十有八九是找不到的，所以建议clazz.getResource(name)，name以&quot;/&quot;开头，除非你就是想在当前类所在的目录下找这个文件。
+        Class&lt;?&gt; c = this;
+        while (c.isArray()) {
+            c = c.getComponentType();
+        }
+        String baseName = c.getName();
+        int index = baseName.lastIndexOf('.');
+        if (index != -1) {
+            name = baseName.substring(0, index).replace('.', '/')
+                +&quot;/&quot;+name;
+        }
+    } else {
+      	// 以&quot;/&quot;开头就截取&quot;/&quot;后字符串返回
+        name = name.substring(1);
+    }
+    return name;
+}
+</code></pre>
+<h5 id="2-classloadergetresource和classloadergetresources">2、classLoader.getResource和classLoader.getResources</h5>
+<p>getResource是从classpath下寻找资源文件，只在当前项目的<code>classes/</code>下寻找，不会去寻找依赖的jar包中的文件；</p>
+<p>getResources是从classpath下寻找所有符合资源路径名称的文件，包括依赖的jar包下的文件；</p>
+<p>为了看出getResources的效果，本地又新建了另外的一个项目haha，haha项目的resource目录下也包含一个spring.xml，当haha项目使用maven打包到本地maven仓库后，生成<code>/Users/xxx/maven/maven_repository/org/example/haha/1.0-SNAPSHOT/haha-1.0-SNAPSHOT.jar</code>，原resource目录下的spring.xml会被放到这个jar包的<code>classes/</code>文件夹下。</p>
+<p>所以，当demo项目引入了haha的依赖后，</p>
+<pre><code class="language-xml">&lt;dependency&gt;
+    &lt;groupId&gt;org.example&lt;/groupId&gt;
+    &lt;artifactId&gt;haha&lt;/artifactId&gt;
+    &lt;version&gt;1.0-SNAPSHOT&lt;/version&gt;
+&lt;/dependency&gt;
+</code></pre>
+<p>运行测试类</p>
+<pre><code class="language-java">public class MyTest {
+    public static void main(String[] args) throws Exception {
+        // 打印一下当前项目classpath路径包括哪些jar包以及项目
+      	// 其中就包含 /Users/xxx/maven/maven_repository/org/example/haha/1.0-SNAPSHOT/haha-1.0-SNAPSHOT.jar
+        System.out.println(System.getProperty(&quot;java.class.path&quot;));
+
+      	System.out.println(&quot;---------------&quot;);
+      
+      	// 会找到classpath下所有的spring.xml文件
+        Enumeration&lt;URL&gt; urls1 = MyTest.class.getClassLoader().getResources(&quot;spring.xml&quot;);
+        while (urls1.hasMoreElements()) {
+            System.out.println(urls1.nextElement());
+        }
+    }
+}
+</code></pre>
+<p>运行结果</p>
+<pre><code>/Library/Java/JavaVirtualMachines/jdk1.8.0_261.jdk/Contents/Home/jre/lib/charsets.... 后面省略
+---------------
+file:/Users/xxx/xxx/demo/target/classes/spring.xml
+jar:file:/Users/xxx/maven/maven_repository/org/example/haha/1.0-SNAPSHOT/haha-1.0-SNAPSHOT.jar!/spring.xml
+</code></pre>
+]]></content>
+    </entry>
+    <entry>
+        <title type="html"><![CDATA[Linux下安装Apache Server]]></title>
+        <id>https://boild-water.github.io/post/linux-xia-an-zhuang-apache-server/</id>
+        <link href="https://boild-water.github.io/post/linux-xia-an-zhuang-apache-server/">
+        </link>
+        <updated>2020-12-25T05:51:51.000Z</updated>
+        <content type="html"><![CDATA[<h3 id="linux下安装apache-server用于当做个人图片服务器">Linux下安装Apache Server（用于当做个人图片服务器）</h3>
+<h4 id="1安装apache-server">1.安装Apache Server</h4>
+<p>​		下载压缩包编译方式，由于需要下载各种依赖包，解决好依赖问题，才能安装成功，过程较为繁琐，这里直接使用yum方式进行安装，自动解决了依赖包问题</p>
+<pre><code class="language-shell">yum install httpd （安装过程，输入y）
+</code></pre>
+<figure data-type="image" tabindex="1"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/20201225134843.png" alt="" loading="lazy"></figure>
+<p>​		出现下面页面即表示安装成功</p>
+<figure data-type="image" tabindex="2"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/20201225134952.png" alt="" loading="lazy"></figure>
+<h4 id="2配置apache-server">2.配置Apache Server</h4>
+<p>​		安装成功后，配置文件会被放在/etc/httpd/conf/目录下，进入该目录，编辑配置文件httpd.cnf，最好先备份一下该配置文件。</p>
+<pre><code class="language-shell">cd /usr/httpd/conf/
+cp httpd.cnf httpd_back.cnf
+vim httpd.cnf
+</code></pre>
+<p>​		在配置文件中添加配置项</p>
+<pre><code class="language-xml"># 图片目录 &quot;/opt/images&quot; 指向磁盘的物理地址 标签内表示权限信息
+&lt;Directory &quot;/opt/boildwater/images&quot;&gt;
+    AllowOverride none
+    Require all granted
+&lt;/Directory&gt;
+</code></pre>
+<p>​		在<IfModule alias_module></IfModule>标签下添加别名映射信息，为/opt/boildwater/images指定一个访问别名</p>
+<pre><code class="language-xml">Alias /boildwater/images /opt/boildwater/images
+</code></pre>
+<p>​		配置完成后，配置文件如下所示：</p>
+<pre><code class="language-xml"># 图片目录 &quot;/opt/images&quot; 指向磁盘的物理地址 标签内表示权限信息
+&lt;Directory &quot;/opt/boildwater/images&quot;&gt;
+    AllowOverride none
+    Require all granted
+&lt;/Directory&gt;
+
+&lt;IfModule alias_module&gt;
+    #
+    # Redirect: Allows you to tell clients about documents that used to 
+    # exist in your server's namespace, but do not anymore. The client 
+    # will make a new request for the document at its new location.
+    # Example:
+    # Redirect permanent /foo http://www.example.com/bar
+
+    #
+    # Alias: Maps web paths into filesystem paths and is used to
+    # access content that does not live under the DocumentRoot.
+    # Example:
+    # Alias /webpath /full/filesystem/path
+    #
+    # If you include a trailing / on /webpath then the server will
+    # require it to be present in the URL.  You will also likely
+    # need to provide a &lt;Directory&gt; section to allow access to
+    # the filesystem path.
+
+    #
+    # ScriptAlias: This controls which directories contain server scripts. 
+    # ScriptAliases are essentially the same as Aliases, except that
+    # documents in the target directory are treated as applications and
+    # run by the server when requested rather than as documents sent to the
+    # client.  The same rules about trailing &quot;/&quot; apply to ScriptAlias
+    # directives as to Alias.
+    #
+    ScriptAlias /cgi-bin/ &quot;/var/www/cgi-bin/&quot;
+
+    # 图片地址alias
+    Alias /boildwater/images /opt/boildwater/images
+
+&lt;/IfModule&gt;
+</code></pre>
+<h4 id="3启动apache-server">3.启动Apache Server</h4>
+<p>​		启动apche server （前提是80端口不能被其他服务占用），查看80端口是否被占用</p>
+<pre><code class="language-shell">netstat -atunp
+</code></pre>
+<p>​		确保Local Address没有80端口即可</p>
+<figure data-type="image" tabindex="3"><img src="https://raw.githubusercontent.com/Boild-Water/image_from_picgo/main/notes/20201225135059.png" alt="" loading="lazy"></figure>
+<p>​		启动apache server</p>
+<pre><code class="language-shell">systemctl start httpd.service	
+</code></pre>
+<p>​		为什么确保80端口不被其他服务占用，查看配置文件httpd.cnf能看到apache server的默认端口为80</p>
+<pre><code class="language-xml">#
+# Listen: Allows you to bind Apache to specific IP addresses and/or
+# ports, instead of the default. See also the &lt;VirtualHost&gt;
+# directive.
+#
+# Change this to Listen on specific IP addresses as shown below to 
+# prevent Apache from glomming onto all bound IP addresses.
+#
+#Listen 12.34.56.78:80
+Listen 80
+</code></pre>
+<p>​		所以在启动服务后，直接在浏览器中输入 <strong>ip地址/配置的目录访问别名/xxx.png</strong> 就可以访问到存放的图片资源了，比如我访问图片就是：</p>
+<p><strong>xx.xx.xxx.xx/boildwater/images/demo.png</strong></p>
+]]></content>
+    </entry>
+</feed>
